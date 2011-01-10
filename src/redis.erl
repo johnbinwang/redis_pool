@@ -293,7 +293,12 @@ send_recv(State, Timeout, Packet, Retries, _Err) ->
                     Res
             end;
         Err ->
-            send_recv(reconnect(State), Timeout, Packet, Retries-1, Err)
+            case reconnect(State) of
+                State1 when is_record(State1, state) ->
+                    send_recv(State1, Timeout, Packet, Retries-1, Err);
+                ReconnectError ->
+                    send_recv(State, Timeout, Packet, Retries-1, ReconnectError)
+            end
     end.
 
 read_resp(Socket, Timeout) ->
