@@ -223,9 +223,9 @@ disconnect(#state{socket=Socket}) ->
     catch gen_tcp:close(Socket).
 
 reconnect(State) ->
+    disconnect(State),
     case connect(State#state.ip, State#state.port, State#state.pass) of
         {ok, Socket} ->
-            disconnect(State),
             State#state{socket=Socket};
         Error ->
             Error
