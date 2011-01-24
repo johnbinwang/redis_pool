@@ -29,8 +29,8 @@ parse(AbsURI) ->
 	    {error, Reason};
 	{Scheme, Rest} ->
 	    case (catch parse_uri_rest(Scheme, Rest)) of
-		{UserInfo, Host, Port, Path, Query} ->
-		    {Scheme, UserInfo, Host, Port, Path, Query};
+		{User, Pass, Host, Port, Path, Query} ->
+		    {Scheme, User, Pass, Host, Port, Path, Query};
 		_  ->
 		    {error, {malformed_url, AbsURI}}    
 	    end
@@ -68,9 +68,21 @@ parse_uri_rest(Scheme, "//" ++ URIPart) ->
 	end,
     
     {UserInfo, HostPort} = split_uri(Authority, "@", {"", Authority}, 1, 1),
+    [User,Pass] =
+        case string:tokens(UserInfo, ":") of
+            [U,P] -> [U,P];
+            [UP] ->
+                case [UserInfo, lists:reverse(UserInfo)] of
+                    [_, ":" ++ _] -> [UP, ""];
+                    [":" ++ _, _] -> ["", UP];
+                    _ -> ["", UP]
+                end;
+            _ ->
+                ["",""]
+        end,
     {Host, Port} = parse_host_port(Scheme, HostPort),
     {Path, Query} = parse_path_query(PathQuery),
-    {UserInfo, Host, Port, Path, Query}.
+    {User, Pass, Host, Port, Path, Query}.
 
 
 parse_path_query(PathQuery) ->
