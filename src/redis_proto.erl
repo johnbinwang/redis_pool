@@ -20,22 +20,14 @@
 %% WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 %% FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
 %% OTHER DEALINGS IN THE SOFTWARE.
--module(redis_pool_sup).
--behaviour(supervisor).
+-module(redis_proto).
+-export([build/1]).
 
-%% Supervisor callbacks
--export([init/1, start_link/0, start_child/2, start_child/3]).
+-define(NL, <<"\r\n">>).
 
-start_link() ->
-    supervisor:start_link({local, ?MODULE}, ?MODULE, []).
-
-start_child(Opts, NumWorkers) ->
-    supervisor:start_child(?MODULE, [Opts, NumWorkers]).
-
-start_child(Name, Opts, NumWorkers) ->
-    supervisor:start_child(?MODULE, [Name, Opts, NumWorkers]).
-
-init([]) ->
-    {ok, {{simple_one_for_one, 100000, 1}, [
-        {undefined, {redis_pool, start_link, []}, transient, 10000, worker, [redis_pool]}
-    ]}}.
+build(Args) when is_list(Args) ->
+    Count = length(Args),
+    Args1 = [begin
+        [<<"$">>, integer_to_list(iolist_size(Arg)), ?NL, Arg, ?NL]
+     end || Arg <- Args],
+    ["*", integer_to_list(Count), ?NL, Args1, ?NL].

@@ -24,114 +24,46 @@
 -behaviour(gen_server).
 
 %% gen_server callbacks
--export([start_link/0, start_link/1, start_link/2, init/1, handle_call/3,
-	     handle_cast/2, handle_info/2, terminate/2, code_change/3]).
+-export([start_link/2, start_link/3, init/1, handle_call/3,
+	 handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
--export([pid/0, pid/1, add_pool/1, add_pool/2, add_pool/3, remove_pool/1, register/2,
-         expand/1, expand/2, expand/3, cycle/1, cycle/2, cycle/3,
-         info/0, info/1, pool_size/0, pool_size/1, info/2, stop/0, stop/1]).
+-export([add/2, add/3, remove/1, register/2, pid/1, unlock/2, info/1, info/2]).
 
--record(state, {opts=[], key='$end_of_table', tid}).
+-record(state, {opts, available, locked}).
 
 -define(TIMEOUT, 8000).
 
 %% API functions
-start_link() ->
-    start_link(?MODULE, []).
+start_link(Opts, NumWorkers) ->
+    gen_server:start_link(?MODULE, [Opts, NumWorkers], []).
 
-start_link(Name) when is_atom(Name) ->
-    start_link(Name, []);
+start_link(Name, Opts, NumWorkers) ->
+    gen_server:start_link({local, Name}, ?MODULE, [Opts, NumWorkers], []).
 
-start_link(Opts) when is_list(Opts) ->
-    gen_server:start_link(?MODULE, [Opts], []).
+add(Opts, NumWorkers) when is_list(Opts), is_integer(NumWorkers) ->
+    redis_pool_sup:start_child(Opts, NumWorkers).
 
-start_link(Name, Opts) when is_atom(Name), is_list(Opts) ->
-    gen_server:start_link({local, Name}, ?MODULE, [Opts], []).
+add(Name, Opts, NumWorkers) when is_atom(Name), is_list(Opts), is_integer(NumWorkers) ->
+    redis_pool_sup:start_child(Name, Opts, NumWorkers).
 
-register(Name, Pid) ->
-    gen_server:cast(Name, {register, Pid}).
+remove(NameOrPid) ->
+    gen_server:call(NameOrPid, stop).
 
-cycle_if_needed(_Name, Opts, Opts) ->
-    ok;
-cycle_if_needed(Name, _Opts, NewOpts) ->
-    cycle(Name, NewOpts).
+register(NameOrPid, WorkerPid) ->
+    gen_server:cast(NameOrPid, {register, WorkerPid}).
 
-add_pool(Size) ->
-    add_pool(redis_pool, [], Size).
-add_pool(Name, Size) ->
-    add_pool(Name, [], Size).
-add_pool(Name, Opts, Size) ->
-    case pid(Name) of
-        {error, {not_found, Name}} ->
-            {ok, _} = redis_pool_sup:start_child(Name, Opts);
-        _ ->
-            cycle_if_needed(Name, info(Name, opts), Opts)
-    end,
-    expand(Name, Size, 30 * 1000).
+pid(NameOrPid) ->
+    gen_server:call(NameOrPid, pid, ?TIMEOUT).
 
-remove_pool(Name) ->
-    case pid(Name) of
-        {error, {not_found, Name}} ->
-            ok;
-        _ ->
-            stop(Name)
-    end.
+unlock(NameOrPid, WorkerPid) ->
+    gen_server:cast(NameOrPid, {unlock, WorkerPid}).
 
-pid() ->
-    pid(?MODULE).
+info(NameOrPid) ->
+    gen_server:call(NameOrPid, info).
 
-pid(Pool) when is_atom(Pool); is_pid(Pool) ->
-    case catch gen_server:call(Pool, pid) of
-        {'EXIT', {noproc, _}} ->
-            {error, {not_found, Pool}};
-        R ->
-            R
-    end;
-
-pid(Pool) ->
-    {error, {invalid_name, Pool}}.
-    
-pool_size() ->
-    pool_size(?MODULE).
-
-pool_size(Name) ->
-    gen_server:call(Name, pool_size).
-
-expand(NewSize) ->
-    expand(?MODULE, NewSize).
-
-expand(Name, NewSize) ->
-    expand(Name, NewSize, ?TIMEOUT).
-
-expand(Name, NewSize, Timeout) when is_integer(NewSize), is_integer(Timeout) ->
-    gen_server:call(Name, {expand, NewSize}, Timeout).
-
-cycle(NewOpts) ->
-    cycle(?MODULE, NewOpts).
-
-cycle(Name, NewOpts) ->
-    cycle(Name, NewOpts, ?TIMEOUT).
-
-cycle(Name, NewOpts, Timeout) when is_list(NewOpts), is_integer(Timeout) ->
-    gen_server:call(Name, {cycle, NewOpts}, Timeout).
-
-info() ->
-    info(?MODULE).
-
-info(Name) ->
-    gen_server:call(Name, info).
-
-info(Name, opts) ->
-    R = info(Name),
-    R#state.opts;
-info(Name, tid) ->
-    R = info(Name),
-    R#state.tid.
-
-stop() ->
-    stop(?MODULE).
-stop(Name) ->
-    gen_server:call(Name, stop).
+info(NameOrPid, opts) ->
+    R = info(NameOrPid),
+    R#state.opts.
 
 %%====================================================================
 %% gen_server callbacks
@@ -145,9 +77,10 @@ stop(Name) ->
 %% Description: Initiates the server
 %% @hidden
 %%--------------------------------------------------------------------
-init([Opts]) ->
-    Tid = ets:new(undefined, [set, protected]),
-    {ok, #state{tid=Tid, opts=Opts}}.
+init([Opts, NumWorkers]) ->
+    Workers = start_workers(NumWorkers, Opts),
+    Queue = queue:from_list(Workers),
+    {ok, #state{opts=Opts, available=Queue, locked=gb_trees:empty()}}.
 
 %%--------------------------------------------------------------------
 %% Function: %% handle_call(Request, From, State) -> {reply, Reply, State} |
@@ -159,46 +92,17 @@ init([Opts]) ->
 %% Description: Handling call messages
 %% @hidden
 %%--------------------------------------------------------------------
-handle_call(pid, _From, #state{key='$end_of_table', tid=Tid}=State) ->
-    case ets:first(Tid) of
-        '$end_of_table' ->
-            {reply, undefined, State#state{key='$end_of_table'}};
-        Pid ->
-            {reply, Pid, State#state{key=Pid}}
+handle_call(pid, {From, _Mref}, #state{available=Queue, locked=Tree}=State) ->
+    case queue:out(Queue) of
+        {{value, Pid}, Queue1} ->
+            Tree1 = gb_trees:enter(Pid, From, Tree),
+            {reply, Pid, State#state{available=Queue1, locked=Tree1}};
+        {empty, _} ->
+            {reply, empty, State}
     end;
-
-handle_call(pid, _From, #state{key=Prev, tid=Tid}=State) ->
-    case ets:next(Tid, Prev) of
-        '$end_of_table' ->
-            case ets:first(Tid) of
-                '$end_of_table' ->
-                    {reply, undefined, State#state{key='$end_of_table'}};
-                Pid ->
-                    {reply, Pid, State#state{key=Pid}}
-            end;
-        Pid ->
-            {reply, Pid, State#state{key=Pid}}
-    end;
-
-handle_call({expand, NewSize}, _From, State) ->
-    case NewSize - ets:info(State#state.tid, size) of
-        Additions when Additions > 0 ->
-            [redis_pid_sup:start_child(self(), State#state.opts) || _ <- lists:seq(1, Additions)],
-            ok;
-        _ ->
-            ok
-    end,
-    {reply, ok, State};
-
-handle_call({cycle, NewOpts}, _From, State) ->
-    [gen_server:call(Pid, {reconnect, NewOpts}) || {Pid, _} <- ets:tab2list(State#state.tid)],
-    {reply, ok, State#state{opts=NewOpts}};
 
 handle_call(info, _From, State) ->
     {reply, State, State};
-
-handle_call(pool_size, _From, State) ->
-    {reply, ets:info(State#state.tid, size), State};
 
 handle_call(stop, _From, State) ->
     {stop, normal, ok, State};
@@ -213,10 +117,14 @@ handle_call(_Msg, _From, State) ->
 %% Description: Handling cast messages
 %% @hidden
 %%--------------------------------------------------------------------
-handle_cast({register, Pid}, #state{tid=Tid}=State) ->
-    erlang:monitor(process, Pid),
-    ets:insert(Tid, {Pid, undefined}),
-    {noreply, State};
+handle_cast({unlock, WorkerPid}, #state{available=Queue, locked=Tree}=State) ->
+    io:format("unlock ~p~n", [WorkerPid]),
+    Tree1 = gb_trees:delete_any(WorkerPid, Tree),
+    {noreply, State#state{available=queue:in(WorkerPid, Queue), locked=Tree1}};
+
+handle_cast({register, WorkerPid}, #state{available=Queue}=State) ->
+    erlang:monitor(process, WorkerPid),
+    {noreply, State#state{available=queue:in(WorkerPid, Queue)}};
 
 handle_cast(_Msg, State) ->
     {noreply, State}.
@@ -228,22 +136,17 @@ handle_cast(_Msg, State) ->
 %% Description: Handling all non call/cast messages
 %% @hidden
 %%--------------------------------------------------------------------
-handle_info({'DOWN', _MonitorRef, process, Pid, _Info}=Msg, #state{tid=Tid, key=Prev}=State) ->
-    case ets:lookup(Tid, Pid) of
-        [{Pid, Caller}] when is_pid(Caller) ->
-            Caller ! Msg;
-        _ ->
-            ok
-    end,
-    ets:delete(Tid, Pid),
-
-    % If I'm removing the previous element in the ets tab I need to reset
-    % the state of the last key otherwise I'll get badarg over and over
-    case Prev == Pid of
+handle_info({'DOWN', _MonitorRef, process, Pid, _Info}, #state{available=Queue, locked=Tree}=State) ->
+    io:format("worker down: ~p~n", [Pid]),
+    case gb_trees:is_defined(Pid, Tree) of
         true ->
-            {noreply, State#state{key='$end_of_table'}};
+            io:format("remove from locked tree~n"),
+            Tree1 = gb_trees:delete(Pid, Tree),
+            {noreply, State#state{locked=Tree1}};
         false ->
-            {noreply, State}
+            io:format("remove from available queue~n"),
+            Queue1 = queue:filter(fun(Item) -> Item =/= Pid end, Queue),
+            {noreply, State#state{available=Queue1}}
     end;
 
 handle_info(_Info, State) ->
@@ -257,8 +160,9 @@ handle_info(_Info, State) ->
 %% The return value is ignored.
 %% @hidden
 %%--------------------------------------------------------------------
-terminate(_Reason, State) ->
-    [gen_server:cast(Pid, die) || {Pid, _} <- ets:tab2list(State#state.tid)],
+terminate(_Reason, #state{available=Queue, locked=Tree}) ->
+    [gen_server:cast(Pid, die) || Pid <- gb_trees:keys(Tree)],
+    [gen_server:cast(Pid, die) || Pid <- queue:to_list(Queue)],
     ok.
 
 %%--------------------------------------------------------------------
@@ -272,3 +176,13 @@ code_change(_OldVsn, State, _Extra) ->
 %%--------------------------------------------------------------------
 %%% Internal functions
 %%--------------------------------------------------------------------
+start_workers(Num, Opts) ->
+    start_workers(Num, Opts, []).
+
+start_workers(0, _Opts, Acc) ->
+    Acc;
+
+start_workers(Num, Opts, Acc) ->
+    {ok, Pid} = redis_pid_sup:start_child(self(), Opts),
+    erlang:monitor(process, Pid),
+    start_workers(Num-1, Opts, [Pid|Acc]).
