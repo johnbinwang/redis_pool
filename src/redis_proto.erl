@@ -20,22 +20,26 @@
 %% WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 %% FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
 %% OTHER DEALINGS IN THE SOFTWARE.
--module(redis_pid_sup).
--behaviour(supervisor).
+-module(redis_proto).
+-export([send_auth/2, build/1]).
 
-%% Supervisor callbacks
--export([start_link/0, start_child/1, start_child/2, init/1]).
+-define(NL, <<"\r\n">>).
 
-start_link() ->
-    supervisor:start_link({local, ?MODULE}, ?MODULE, []).
+send_auth(Socket, Pass) ->
+    case gen_tcp:send(Socket, [<<"AUTH ">>, Pass, ?NL]) of
+        ok ->
+            case gen_tcp:recv(Socket, 0) of
+                {ok, <<"+OK\r\n">>} -> true;
+                {ok, Err} -> {error, Err};
+                Err -> Err
+            end;
+        Err ->
+            Err
+    end.
 
-start_child(Opts) ->
-    supervisor:start_child(?MODULE, [Opts]).
-
-start_child(Pool, Opts) ->
-    supervisor:start_child(?MODULE, [Pool, Opts]).
-
-init([]) ->    
-    {ok, {{simple_one_for_one, 100000, 1}, [
-        {undefined, {redis, start_link, []}, transient, 10000, worker, [redis]}
-    ]}}.
+build(Args) when is_list(Args) ->
+    Count = length(Args),
+    Args1 = [begin
+        [<<"$">>, integer_to_list(iolist_size(Arg)), ?NL, Arg, ?NL]
+     end || Arg <- Args],
+    ["*", integer_to_list(Count), ?NL, Args1, ?NL].

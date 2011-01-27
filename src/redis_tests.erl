@@ -20,22 +20,36 @@
 %% WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 %% FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
 %% OTHER DEALINGS IN THE SOFTWARE.
--module(redis_subscribe).
--export([connect/3]).
+-module(redis_tests).
+-include_lib("eunit/include/eunit.hrl").
 
-connect(Key, Opts, {M,F,A}=Callback) when is_binary(Key), is_list(Opts), is_atom(M), is_atom(F), is_list(A) ->
-    connect1(Key, Opts, Callback);
-connect(Key, Opts, Callback) when is_binary(Key), is_list(Opts), is_function(Callback) ->
-    connect1(Key, Opts, Callback);
-connect(Key, Opts, {Fun, Args}=Callback) when is_binary(Key), is_list(Opts), is_function(Fun), is_list(Args) ->
-    connect1(Key, Opts, Callback).
+redis_test() ->
+    application:start(sasl),
+    application:start(redis),
+    {ok, Pid} = redis:start_link([]),
 
-connect1(Key, Opts, Callback) ->
-    case redis_pid_sup:start_child(undefined, Opts) of
-        {ok, Pid} ->
-            ok = redis:subscribe(Pid, Key, Callback),
-            {ok, Pid};
-        Err ->
-            Err
-    end.
+    %% STRINGS
+    ?assertEqual(<<"OK">>, redis:q(Pid, ["FLUSHALL"])),
+    ?assertEqual(undefined, redis:q(Pid, ["GET", "foo"])),
+    ?assertEqual(<<"OK">>, redis:q(Pid, ["SET", "foo", "bar"])),
+    ?assertEqual(<<"bar">>, redis:q(Pid, ["GET", "foo"])),
+    ?assertEqual(1, redis:q(Pid, ["DEL", "foo"])),
+
+    %% SETS
+    ?assertEqual([], redis:q(Pid, ["SMEMBERS", "foo"])),
+    ?assertEqual(1, redis:q(Pid, ["SADD", "foo", "bar"])),
+    ?assertEqual(1, redis:q(Pid, ["SADD", "foo", "baz"])),
+    ?assertEqual([<<"baz">>, <<"bar">>], redis:q(Pid, ["SMEMBERS", "foo"])),
+
+    ok.
+
+redis_pool_test() ->
+    application:start(sasl),
+    application:start(redis),
+    {ok, Pool} = redis_pool:add([], 2),
     
+    ?assertEqual(<<"OK">>, redis_pool:q(Pool, ["FLUSHALL"])),
+    ?assertEqual(<<"OK">>, redis_pool:q(Pool, ["SET", "foo", "bar"])),
+    ?assertEqual(<<"bar">>, redis_pool:q(Pool, ["GET", "foo"])),
+
+    ok.

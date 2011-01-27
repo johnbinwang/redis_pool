@@ -1,0 +1,3 @@
+#!/bin/sh
+
+erl -pa ebin -noshell -eval 'eunit:test({application,redis})' -s init stop
