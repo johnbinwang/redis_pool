@@ -10,6 +10,7 @@
       redis_proto,
       redis_shard,
       redis_sup,
+      redis_tests,
       redis_uri]},
     {applications, [stdlib, kernel, sasl]},
     {registered, []},
