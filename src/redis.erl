@@ -24,45 +24,46 @@
 -behaviour(gen_server).
 
 %% gen_server callbacks
--export([start_link/2, init/1, handle_call/3, handle_cast/2, 
-         handle_info/2, terminate/2, code_change/3]).
+-export([start_link/1, start_link/2, init/1, handle_call/3,
+          handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
--export([q/2, q/3, stop/1]).
+-compile(export_all).
 
 -define(NL, <<"\r\n">>).
 
--record(state, {ip = "127.0.0.1", port = 6379, db = 0, pass, socket, key, callback, buffer}).
+-record(state, {ip = "127.0.0.1", port = 6379, db = 0, pass, socket}).
 
 -define(TIMEOUT, 5000).
 
 %% API functions
+start_link(Opts) ->
+    gen_server:start_link(?MODULE, [Opts], []).
+
 start_link(Pool, Opts) ->
-    gen_server:start_link(?MODULE, [Pool, Opts], []).
+    case gen_server:start_link(?MODULE, [Opts], []) of
+        {ok, Pid} ->
+            redis_pool:register(Pool, Pid),
+            {ok, Pid};
+        Err ->
+            Err
+    end.
 
-q(Pool, Parts) ->
-    q(Pool, Parts, ?TIMEOUT).
+q(Pid, Parts) ->
+    q(Pid, Parts, ?TIMEOUT).
 
-q(Pool, Parts, Timeout) ->
-    case redis_pool:pid(Pool) of
-        Pid when is_pid(Pid) ->
-            case catch gen_server:call(Pid, {q, Parts, Timeout}, Timeout) of
-                {'EXIT', Error} ->
-                    io:format("caught exception ~p~n", [Error]),
-                    Error;
-                {error, Error} ->
-                    io:format("caught error ~p~n", [Error]),
-                    redis_pool:unlock(Pool, Pid),
-                    {error, Error};
-                Result ->
-                    redis_pool:unlock(Pool, Pid),
-                    Result
-            end;
-        Error ->
-            Error
+q(Pid, Parts, Timeout) ->
+    case catch gen_server:call(Pid, {q, Parts}, Timeout) of
+        {'EXIT', {timeout, {gen_server, call, _}}} ->
+            gen_server:cast(Pid, {stop, timeout}),
+            {error, timeout};
+        {'EXIT', {Error,   {gen_server, call, _}}} ->
+            {error, Error};
+        Reply ->
+            Reply
     end.
 
 stop(Pid) ->
-    gen_server:call(Pid, stop).
+    gen_server:cast(Pid, {stop, normal}).
 
 %%====================================================================
 %% gen_server callbacks
@@ -75,12 +76,11 @@ stop(Pid) ->
 %%    {stop, Reason}
 %% Description: Initiates the server
 %%--------------------------------------------------------------------
-init([Pool, Opts]) ->
+init([Opts]) ->
     io:format("init redis worker: ~p~n", [self()]),
     State = parse_options(Opts, #state{}),
     case connect(State#state.ip, State#state.port, State#state.pass) of
         {ok, Socket} ->
-            Pool =/= undefined andalso redis_pool:register(Pool, self()),
             {ok, State#state{socket=Socket}};
         Error ->
             {stop, Error}
@@ -95,20 +95,14 @@ init([Pool, Opts]) ->
 %%    {stop, Reason, State}
 %% Description: Handling call messages
 %%--------------------------------------------------------------------
-handle_call({q, Parts, Timeout}, _From, State) ->
-    case do_q(Parts, Timeout, State#state.socket) of
-        {redis_error, Error} ->
-            {reply, {error, Error}, State};
-        {error, timeout} ->
-            {reply, {error, timeout}, State};
-        {error, Reason} ->
-            {stop, Reason, {error, Reason}, State};
-        Result ->
-            {reply, Result, State}
+handle_call({q, Parts}, _From, #state{socket=Socket, ip=Ip, port=Port, pass=Pass}=State) ->
+    Packet = redis_proto:build(Parts),
+    case send_recv(Socket, Ip, Port, Pass, Packet, 1) of
+        {error, Error} ->
+            {stop, Error, State};
+        {Reply, NewSocket} ->
+            {reply, Reply, State#state{socket=NewSocket}}
     end;
-
-handle_call(stop, _From, State) ->
-    {stop, normal, ok, State};
 
 handle_call(_Msg, _From, State) ->
     {reply, unknown_message, State}.
@@ -119,6 +113,9 @@ handle_call(_Msg, _From, State) ->
 %%    {stop, Reason, State}
 %% Description: Handling cast messages
 %%--------------------------------------------------------------------
+handle_cast({stop, Reason}, State) ->
+    {stop, Reason, State};
+
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
@@ -155,12 +152,6 @@ code_change(_OldVsn, State, _Extra) ->
 disconnect(Socket) ->
     catch gen_tcp:close(Socket).
 
-do_q(Parts, Timeout, Socket) when is_list(Parts) ->
-    send_recv(Socket, Timeout, redis_proto:build(Parts));
-
-do_q(Packet, Timeout, Socket) when is_binary(Packet) ->
-    send_recv(Socket, Timeout, Packet).
-    
 parse_options([], State) ->
     State;
 parse_options([{ip, Ip} | Rest], State) ->
@@ -177,57 +168,59 @@ connect(Ip, Port, Pass) ->
         {ok, Sock} when Pass == undefined ->
             {ok, Sock};
         {ok, Sock} ->
-            case do_auth(Sock, Pass) of
-                {ok, <<"OK">>} -> {ok, Sock};
+            case redis_proto:send_auth(Sock, Pass) of
+                true -> {ok, Sock};
                 Err -> Err
             end;
         Err ->
             exit(Err)
     end.
 
-do_auth(Socket, Pass) when is_binary(Pass), size(Pass) > 0 ->
-    send_recv(Socket, ?TIMEOUT, [<<"AUTH ">>, Pass, ?NL]);
+send_recv(_Socket, _Ip, _Port, _Pass, _Packet, 0) ->
+    {error, closed};
 
-do_auth(_Socket, _Pass) ->
-    {ok, "not authenticated"}.
-
-send_recv(Socket, Timeout, Packet) when is_port(Socket) ->
+send_recv(Socket, Ip, Port, Pass, Packet, Retries) when is_port(Socket) ->
     case gen_tcp:send(Socket, Packet) of
         ok ->
-            io:format("read_resp ~p~n", [read_resp(Socket, Timeout)]),
-            io:format("other ~p~n", [gen_tcp:recv(Socket, 0)]);
+            case read_resp(Socket) of
+                {error, Err} ->
+                    disconnect(Socket),
+                    {error, Err};
+                Reply ->
+                    {Reply, Socket}
+            end;
+        {error, closed} ->
+            disconnect(Socket),
+            case connect(Ip, Port, Pass) of
+                {ok, Socket1} ->
+                    send_recv(Socket1, Ip, Port, Pass, Packet, Retries);
+                _ ->
+                    send_recv(Socket, Ip, Port, Pass, Packet, Retries-1)
+            end;
         Error ->
             disconnect(Socket),
-            exit(Error)
+            Error
     end.
 
-read_resp(Socket, Timeout) ->
+read_resp(Socket) ->
     inet:setopts(Socket, [{packet, line}]),
-    Resp = gen_tcp:recv(Socket, 0, Timeout),
-    io:format("read_resp ~p~n", [Resp]),
-    case Resp of
-        {ok, <<"*", Rest/binary>>} ->
-            Count = list_to_integer(binary_to_list(strip_nl(Rest))),
-            io:format("read multi bulk ~p~n", [Count]),
-            read_multi_bulk(Socket, Timeout, Count, []);
+    case gen_tcp:recv(Socket, 0) of
         {ok, <<"+", Rest/binary>>} ->
-            io:format("read single line~n"),
-            {ok, strip_nl(Rest)};
+            strip_nl(Rest);
         {ok, <<"-", Rest/binary>>} ->
-            {redis_error, strip_nl(Rest)};
-        {ok, <<":", Size/binary>>} ->
-            io:format("read integer~n"),
-            {ok, list_to_integer(binary_to_list(strip_nl(Size)))};
+            strip_nl(Rest);
+        {ok, <<":", Rest/binary>>} ->
+            Int = strip_nl(Rest),
+            list_to_integer(binary_to_list(Int));
         {ok, <<"$", Size/binary>>} ->
             Size1 = list_to_integer(binary_to_list(strip_nl(Size))),
-            io:format("read bulk reply ~p~n", [Size1]),
             read_body(Socket, Size1);
-        {ok, <<"\r\n">>} ->
-            io:format("read nl~n"),
-            read_resp(Socket, Timeout);
+        {ok, <<"*", Rest/binary>>} ->
+            Count = list_to_integer(binary_to_list(strip_nl(Rest))),
+            read_multi_bulk(Socket, Count, []);
         {error, Err} ->
             disconnect(Socket),
-            exit({error, Err})
+            {error, Err}
     end.
 
 strip_nl(B) when is_binary(B) ->
@@ -236,22 +229,25 @@ strip_nl(B) when is_binary(B) ->
     B1.
     
 read_body(_Socket, -1) ->
-    {ok, undefined};
+    undefined;
+
 read_body(_Socket, 0) ->
-    {ok, <<>>};
+    <<>>;
+
 read_body(Socket, Size) ->
     inet:setopts(Socket, [{packet, raw}]),
-    case gen_tcp:recv(Socket, Size) of
+    case gen_tcp:recv(Socket, Size + size(?NL)) of
         {error, Error} ->
             disconnect(Socket),
-            exit({error, Error});
-        Recv ->
-            Recv
+            {error, Error};
+        {ok, <<Body:Size/binary, _/binary>>} ->
+            Body
     end.
 
-read_multi_bulk(_Data, _Timeout, 0, Acc) ->
+read_multi_bulk(_Socket, 0, Acc) ->
     lists:reverse(Acc);
-read_multi_bulk(Socket, Timeout, Count, Acc) ->
-    Acc1 = [read_resp(Socket, Timeout) | Acc],
-    read_multi_bulk(Socket, Timeout, Count-1, Acc1).
+
+read_multi_bulk(Socket, Count, Acc) ->
+    Acc1 = [read_resp(Socket) | Acc],
+    read_multi_bulk(Socket, Count-1, Acc1).
 

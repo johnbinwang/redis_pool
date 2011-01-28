@@ -21,9 +21,20 @@
 %% FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
 %% OTHER DEALINGS IN THE SOFTWARE.
 -module(redis_proto).
--export([build/1]).
+-export([send_auth/2, build/1]).
 
 -define(NL, <<"\r\n">>).
+
+send_auth(Socket, Pass) ->
+    case gen_tcp:send(Socket, [<<"AUTH ">>, Pass, ?NL]) of
+        ok ->
+            case gen_tcp:recv(Socket, 0) of
+                {ok, <<"+OK\r\n">>} -> true;
+                Err -> Err
+            end;
+        Err ->
+            Err
+    end.
 
 build(Args) when is_list(Args) ->
     Count = length(Args),

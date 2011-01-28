@@ -27,9 +27,9 @@
 -export([start_link/2, start_link/3, init/1, handle_call/3,
 	 handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
--export([add/2, add/3, remove/1, register/2, pid/1, unlock/2, info/1, info/2]).
+-export([add/2, add/3, remove/1, register/2, pid/1, info/1, info/2, q/2, q/3]).
 
--record(state, {opts, available, locked}).
+-record(state, {opts, queue}).
 
 -define(TIMEOUT, 8000).
 
@@ -55,15 +55,23 @@ register(NameOrPid, WorkerPid) ->
 pid(NameOrPid) ->
     gen_server:call(NameOrPid, pid, ?TIMEOUT).
 
-unlock(NameOrPid, WorkerPid) ->
-    gen_server:cast(NameOrPid, {unlock, WorkerPid}).
-
 info(NameOrPid) ->
     gen_server:call(NameOrPid, info).
 
 info(NameOrPid, opts) ->
     R = info(NameOrPid),
     R#state.opts.
+
+q(NameOrPid, Parts) ->
+    q(NameOrPid, Parts, ?TIMEOUT).
+
+q(NameOrPid, Parts, Timeout) ->
+    case pid(NameOrPid) of
+        Pid when is_pid(Pid) ->
+            redis:q(Pid, Parts, Timeout);
+        Err ->
+            Err
+    end.
 
 %%====================================================================
 %% gen_server callbacks
@@ -80,7 +88,7 @@ info(NameOrPid, opts) ->
 init([Opts, NumWorkers]) ->
     Workers = start_workers(NumWorkers, Opts),
     Queue = queue:from_list(Workers),
-    {ok, #state{opts=Opts, available=Queue, locked=gb_trees:empty()}}.
+    {ok, #state{opts=Opts, queue=Queue}}.
 
 %%--------------------------------------------------------------------
 %% Function: %% handle_call(Request, From, State) -> {reply, Reply, State} |
@@ -92,13 +100,13 @@ init([Opts, NumWorkers]) ->
 %% Description: Handling call messages
 %% @hidden
 %%--------------------------------------------------------------------
-handle_call(pid, {From, _Mref}, #state{available=Queue, locked=Tree}=State) ->
+handle_call(pid, _From, #state{queue=Queue}=State) ->
     case queue:out(Queue) of
         {{value, Pid}, Queue1} ->
-            Tree1 = gb_trees:enter(Pid, From, Tree),
-            {reply, Pid, State#state{available=Queue1, locked=Tree1}};
+            Queue2 = queue:in(Pid, Queue1),
+            {reply, Pid, State#state{queue=Queue2}};
         {empty, _} ->
-            {reply, empty, State}
+            {reply, undefined, State}
     end;
 
 handle_call(info, _From, State) ->
@@ -117,14 +125,9 @@ handle_call(_Msg, _From, State) ->
 %% Description: Handling cast messages
 %% @hidden
 %%--------------------------------------------------------------------
-handle_cast({unlock, WorkerPid}, #state{available=Queue, locked=Tree}=State) ->
-    io:format("unlock ~p~n", [WorkerPid]),
-    Tree1 = gb_trees:delete_any(WorkerPid, Tree),
-    {noreply, State#state{available=queue:in(WorkerPid, Queue), locked=Tree1}};
-
-handle_cast({register, WorkerPid}, #state{available=Queue}=State) ->
+handle_cast({register, WorkerPid}, #state{queue=Queue}=State) ->
     erlang:monitor(process, WorkerPid),
-    {noreply, State#state{available=queue:in(WorkerPid, Queue)}};
+    {noreply, State#state{queue=queue:in(WorkerPid, Queue)}};
 
 handle_cast(_Msg, State) ->
     {noreply, State}.
@@ -136,18 +139,10 @@ handle_cast(_Msg, State) ->
 %% Description: Handling all non call/cast messages
 %% @hidden
 %%--------------------------------------------------------------------
-handle_info({'DOWN', _MonitorRef, process, Pid, _Info}, #state{available=Queue, locked=Tree}=State) ->
+handle_info({'DOWN', _MonitorRef, process, Pid, _Info}, #state{queue=Queue}=State) ->
     io:format("worker down: ~p~n", [Pid]),
-    case gb_trees:is_defined(Pid, Tree) of
-        true ->
-            io:format("remove from locked tree~n"),
-            Tree1 = gb_trees:delete(Pid, Tree),
-            {noreply, State#state{locked=Tree1}};
-        false ->
-            io:format("remove from available queue~n"),
-            Queue1 = queue:filter(fun(Item) -> Item =/= Pid end, Queue),
-            {noreply, State#state{available=Queue1}}
-    end;
+    Queue1 = queue:filter(fun(Item) -> Item =/= Pid end, Queue),
+    {noreply, State#state{queue=Queue1}};
 
 handle_info(_Info, State) ->
     {noreply, State}.
@@ -160,8 +155,7 @@ handle_info(_Info, State) ->
 %% The return value is ignored.
 %% @hidden
 %%--------------------------------------------------------------------
-terminate(_Reason, #state{available=Queue, locked=Tree}) ->
-    [gen_server:cast(Pid, die) || Pid <- gb_trees:keys(Tree)],
+terminate(_Reason, #state{queue=Queue}) ->
     [gen_server:cast(Pid, die) || Pid <- queue:to_list(Queue)],
     ok.
 
