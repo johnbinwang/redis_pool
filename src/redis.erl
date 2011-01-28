@@ -186,6 +186,8 @@ send_recv(Socket, Ip, Port, Pass, Packet, Retries) when is_port(Socket) ->
                 {error, Err} ->
                     disconnect(Socket),
                     {error, Err};
+                {redis_error, Err} ->
+                    {{error, Err}, Socket};
                 Reply ->
                     {Reply, Socket}
             end;
@@ -208,7 +210,7 @@ read_resp(Socket) ->
         {ok, <<"+", Rest/binary>>} ->
             strip_nl(Rest);
         {ok, <<"-", Rest/binary>>} ->
-            strip_nl(Rest);
+            {redis_error, strip_nl(Rest)};
         {ok, <<":", Rest/binary>>} ->
             Int = strip_nl(Rest),
             list_to_integer(binary_to_list(Int));
@@ -248,6 +250,10 @@ read_multi_bulk(_Socket, 0, Acc) ->
     lists:reverse(Acc);
 
 read_multi_bulk(Socket, Count, Acc) ->
-    Acc1 = [read_resp(Socket) | Acc],
-    read_multi_bulk(Socket, Count-1, Acc1).
+    Resp =
+        case read_resp(Socket) of
+            {redis_error, Err} -> {error, Err};
+            Other -> Other
+        end,
+    read_multi_bulk(Socket, Count-1, [Resp|Acc]).
 
