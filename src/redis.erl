@@ -165,7 +165,7 @@ parse_options([{pass, Pass} | Rest], State) ->
 
 connect(Ip, Port, Pass) ->
     case gen_tcp:connect(Ip, Port, [binary, {active, false}, {keepalive, true}, {nodelay, true}]) of
-        {ok, Sock} when Pass == undefined ->
+        {ok, Sock} when Pass == undefined; Pass == <<>>; Pass == "" ->
             {ok, Sock};
         {ok, Sock} ->
             case redis_proto:send_auth(Sock, Pass) of
