@@ -30,6 +30,7 @@ send_auth(Socket, Pass) ->
         ok ->
             case gen_tcp:recv(Socket, 0) of
                 {ok, <<"+OK\r\n">>} -> true;
+                {ok, Err} -> {error, Err};
                 Err -> Err
             end;
         Err ->
