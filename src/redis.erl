@@ -164,7 +164,7 @@ parse_options([{pass, Pass} | Rest], State) ->
     parse_options(Rest, State#state{pass = Pass}).
 
 connect(Ip, Port, Pass) ->
-    case gen_tcp:connect(Ip, Port, [binary, {active, false}, {keepalive, true}]) of
+    case gen_tcp:connect(Ip, Port, [binary, {active, false}, {keepalive, true}, {nodelay, true}]) of
         {ok, Sock} when Pass == undefined ->
             {ok, Sock};
         {ok, Sock} ->
@@ -173,7 +173,7 @@ connect(Ip, Port, Pass) ->
                 Err -> Err
             end;
         Err ->
-            exit(Err)
+            Err
     end.
 
 send_recv(_Socket, _Ip, _Port, _Pass, _Packet, 0) ->
