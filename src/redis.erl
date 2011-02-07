@@ -233,9 +233,6 @@ strip_nl(B) when is_binary(B) ->
 read_body(_Socket, -1) ->
     undefined;
 
-read_body(_Socket, 0) ->
-    <<>>;
-
 read_body(Socket, Size) ->
     inet:setopts(Socket, [{packet, raw}]),
     case gen_tcp:recv(Socket, Size + size(?NL)) of
