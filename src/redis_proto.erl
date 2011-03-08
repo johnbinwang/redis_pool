@@ -37,9 +37,27 @@ send_auth(Socket, Pass) ->
             Err
     end.
 
+build(Packet) when is_binary(Packet) ->
+    Packet;
+
+build([[Char|_]|_]=Args) when is_integer(Char) ->
+    build_request(Args);
+
+build([Bin|_]=Args) when is_binary(Bin) ->
+    build_request(Args);
+
 build(Args) when is_list(Args) ->
+    build_pipelined_request(Args, []).
+
+build_request(Args) ->
     Count = length(Args),
     Args1 = [begin
         [<<"$">>, integer_to_list(iolist_size(Arg)), ?NL, Arg, ?NL]
      end || Arg <- Args],
-    ["*", integer_to_list(Count), ?NL, Args1, ?NL].
+    iolist_to_binary(["*", integer_to_list(Count), ?NL, Args1, ?NL]).
+
+build_pipelined_request([], Acc) ->
+    lists:reverse(Acc);
+
+build_pipelined_request([Args|Rest], Acc) ->
+    build_pipelined_request(Rest, [build_request(Args)|Acc]).

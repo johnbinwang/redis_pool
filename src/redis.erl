@@ -182,7 +182,7 @@ send_recv(_Socket, _Ip, _Port, _Pass, _Packet, 0) ->
 send_recv(Socket, Ip, Port, Pass, Packet, Retries) when is_port(Socket) ->
     case gen_tcp:send(Socket, Packet) of
         ok ->
-            case read_resp(Socket) of
+            case read_resp(Socket, pipelined_packet_count(Packet)) of
                 {error, Err} ->
                     disconnect(Socket),
                     {error, Err};
@@ -203,6 +203,18 @@ send_recv(Socket, Ip, Port, Pass, Packet, Retries) when is_port(Socket) ->
             disconnect(Socket),
             Error
     end.
+
+read_resp(Socket, undefined) ->
+    read_resp(Socket);
+
+read_resp(Socket, PipelinedPacketCount) ->
+    read_resp(Socket, PipelinedPacketCount, []).
+
+read_resp(_Socket, 0, Acc) ->
+    lists:reverse(Acc);
+
+read_resp(Socket, PipelinedPacketCount, Acc) ->
+    read_resp(Socket, PipelinedPacketCount-1, [read_resp(Socket)|Acc]).
 
 read_resp(Socket) ->
     inet:setopts(Socket, [{packet, line}]),
@@ -254,3 +266,8 @@ read_multi_bulk(Socket, Count, Acc) ->
         end,
     read_multi_bulk(Socket, Count-1, [Resp|Acc]).
 
+pipelined_packet_count(Packets) when is_list(Packets) ->
+    length(Packets);
+
+pipelined_packet_count(Packet) when is_binary(Packet) ->
+    undefined.
