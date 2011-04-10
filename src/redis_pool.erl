@@ -27,7 +27,7 @@
 -export([start_link/2, start_link/3, init/1, handle_call/3,
 	 handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
--export([add/2, add/3, remove/1, register/2, pid/1, info/1, info/2, q/2, q/3]).
+-export([add/2, add/3, remove/1, cycle/2, register/2, pid/1, info/1, info/2, q/2, q/3]).
 
 -record(state, {opts, queue}).
 
@@ -48,6 +48,9 @@ add(Name, Opts, NumWorkers) when is_atom(Name), is_list(Opts), is_integer(NumWor
 
 remove(NameOrPid) ->
     gen_server:call(NameOrPid, stop).
+
+cycle(NameOrPid, Opts) ->
+    gen_server:call(NameOrPid, {cycle, Opts}).
 
 register(NameOrPid, WorkerPid) ->
     gen_server:cast(NameOrPid, {register, WorkerPid}).
@@ -108,6 +111,13 @@ handle_call(pid, _From, #state{queue=Queue}=State) ->
         {empty, _} ->
             {reply, undefined, State}
     end;
+
+handle_call({cycle, Opts}, _From, #state{queue=Queue}) ->
+    Size = queue:size(Queue),
+    [redis:stop(Pid) || Pid <- queue:to_list(Queue)],
+    Workers = start_workers(Size, Opts),
+    Queue1 = queue:from_list(Workers),
+    {reply, ok, #state{opts=Opts, queue=Queue1}};
 
 handle_call(info, _From, State) ->
     {reply, State, State};
