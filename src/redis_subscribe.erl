@@ -21,7 +21,7 @@
 %% FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
 %% OTHER DEALINGS IN THE SOFTWARE.
 -module(redis_subscribe).
--export([connect/3]).
+-export([connect/3,unsubscribe/2]).
 
 connect(Key, Opts, {M,F,A}=Callback) when is_binary(Key), is_list(Opts), is_atom(M), is_atom(F), is_list(A) ->
     connect1(Key, Opts, Callback);
@@ -38,4 +38,6 @@ connect1(Key, Opts, Callback) ->
         Err ->
             Err
     end.
-    
+unsubscribe(Pid,Key) -> 
+	ok = redis:unsubscribe(Pid,Key),
+	{ok,Pid}. 

@@ -29,7 +29,7 @@
 
 -export([build_request/1, connect/3, stop/1]).
 
--export([q/1, q/2, q/3, subscribe/3]).
+-export([q/1, q/2, q/3, subscribe/3,unsubscribe/2]).
 
 -define(NL, <<"\r\n">>).
 
@@ -72,6 +72,10 @@ q(Pid, Parts, Timeout) when is_pid(Pid) ->
 
 subscribe(Pid, Key, Callback) ->
     gen_server:call(Pid, {subscribe, Key, Callback}).
+
+%%this is a new method added by johnbin wang 
+unsubscribe(Pid, Key) ->
+	gen_server:call(Pid,{unsubscribe, Key}).
 
 stop(Pid) ->
     gen_server:call(Pid, stop).
@@ -126,7 +130,15 @@ handle_call({subscribe, Key, Callback}, _From, #state{socket=Socket}=State) ->
             inet:setopts(Socket, [{active, true}]),
             {reply, ok, State#state{key=Key, callback=Callback, buffer=[]}}
     end;
-
+%% added by johnbin wang
+handle_call({unsubscribe, Key}, _From, #state{socket=Socket}=State) ->
+    case do_q([<<"UNSUBSCRIBE">>, Key], ?TIMEOUT, State) of
+        {error, Reason} ->
+            {stop, Reason, {error, Reason}, State};
+        [{ok, <<"unsubscribe">>}, {ok, Key}, {ok, _}] ->
+%%             inet:setopts(Socket, [{active, true}]),
+            {reply, ok, State#state{key=Key, buffer=[]}}
+    end;
 handle_call({reconnect, NewOpts}, _From, State) ->
     State1 = parse_options(NewOpts, #state{}),
     case reconnect(State1#state{socket=State#state.socket}) of
