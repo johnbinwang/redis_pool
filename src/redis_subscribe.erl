@@ -31,13 +31,13 @@ connect(Key, Opts, {Fun, Args}=Callback) when is_binary(Key), is_list(Opts), is_
     connect1(Key, Opts, Callback).
 
 connect1(Key, Opts, Callback) ->
-    case redis_pid_sup:start_child(undefined, Opts) of
-        {ok, Pid} ->
-            ok = redis:subscribe(Pid, Key, Callback),
-            {ok, Pid};
-        Err ->
-            Err
-    end.
-unsubscribe(Pid,Key) -> 
+	case redis:start_link(undefinded, Opts) of
+		{ok,Pid} -> 
+			redis:subscribe(Pid, Key, Callback),
+			{ok,Pid};	
+		_ -> err
+	end.
+unsubscribe(Pid,Key) ->
 	ok = redis:unsubscribe(Pid,Key),
-	{ok,Pid}. 
+	redis:stop(Pid),
+	{ok,Pid}.  
